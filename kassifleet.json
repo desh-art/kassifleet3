@@ -1,0 +1,41 @@
+{
+  "users": [
+    {
+      "id": "a636b0eb-dcec-40f4-89e5-e1d25e2a748c",
+      "name": "sibusiso",
+      "email": "sibusisodushu7@gmail.com",
+      "role": "driver",
+      "passwordHash": "210000:vpKYoTJpNfOVQcMi0xZ9Zw:QiIJzHJdDMkuJ9x5kErVmgYZhjh5rECSrgwzjawawF5A2oH2b-z59KmJRFHcofYtKj6L09V6BkHFIjJ_BgtqwQ",
+      "createdAt": "2026-10-29T16:38:59.455Z"
+    }
+  ],
+  "menu": [
+    {
+      "id": "meal-1",
+      "vendor_id": "vendor-demo",
+      "name": "Chicken Kota",
+      "description": "Grilled chicken, chips and house sauce",
+      "price_cents": 8500,
+      "available": true
+    },
+    {
+      "id": "meal-2",
+      "vendor_id": "vendor-demo",
+      "name": "Beef Burger",
+      "description": "Beef patty, lettuce and tomato",
+      "price_cents": 7200,
+      "available": true
+    },
+    {
+      "id": "meal-3",
+      "vendor_id": "vendor-demo",
+      "name": "Pap and Chakalaka",
+      "description": "Soft pap with spicy chakalaka",
+      "price_cents": 5400,
+      "available": true
+    }
+  ],
+  "orders": [],
+  "nextOrder": 1,
+  "nextMenuItem": 4
+}

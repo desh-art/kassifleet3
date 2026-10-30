@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#101828">
+  <title>KassiFleet | Food delivery</title>
+  <link rel="stylesheet" href="css.js">
+  <script src="js.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="index.html">Kassi<span>Fleet</span></a>
+    <a href="#login">Sign in</a>
+  </header>
+  <main class="container">
+    <section class="hero">
+      <p class="eyebrow">GOOD FOOD. FAST DELIVERY.</p>
+      <h1>Your next favourite meal is a tap away.</h1>
+      <p>Discover local restaurants and order online.</p>
+    </section>
+    <section id="login" class="panel">
+      <h2>Welcome back</h2>
+      <form id="loginForm">
+        <label>Email<input name="email" type="email" required></label>
+        <label>Password<input name="password" type="password" required></label>
+        <button>Sign in</button>
+      </form>
+      <p id="message" role="status"></p>
+    </section>
+    <section class="panel">
+      <h2>Explore the menu</h2>
+      <button id="loadMenu" class="secondary">Load menu</button>
+      <div id="menu" class="menu-grid"></div>
+      <h3>Your basket</h3>
+      <div id="basket">Your basket is empty.</div>
+      <form id="checkoutForm">
+        <label>Delivery address
+          <input name="address" required placeholder="Street and suburb">
+        </label>
+        <button>Place order</button>
+      </form>
+    </section>
+  </main>
+</body>
+</html>
+SELECT id, vendor_id, name, description, price_cents, available
+ FROM menu_items
+ WHERE available=true
+ ORDER BY name`

@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>KassiFleet | Vendor dashboard</title>
+  <link rel="stylesheet" href="css.js">
+  <script src="vendor.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="index.html">Kassi<span>Fleet</span></a>
+    <span>Vendor dashboard</span>
+  </header>
+  <main class="container">
+    <section class="hero">
+      <p class="eyebrow">YOUR BUSINESS, CONNECTED</p>
+      <h1>Manage your restaurant.</h1>
+      <p>Add menu items and update incoming orders.</p>
+    </section>
+    <section class="panel">
+      <h2>Vendor sign in</h2>
+      <form id="loginForm">
+        <label>Email<input name="email" type="email" required></label>
+        <label>Password<input name="password" type="password" required></label>
+        <button>Sign in</button>
+      </form>
+      <p id="message" role="status"></p>
+    </section>
+    <section class="panel">
+      <h2>Add a menu item</h2>
+      <form id="menuForm">
+        <label>Item name<input name="name" required></label>
+        <label>Description<textarea name="description"></textarea></label>
+        <label>Price in rand<input name="price" type="number" min="0.01" step="0.01" required></label>
+        <button>Add menu item</button>
+      </form>
+    </section>
+    <section class="panel">
+      <h2>Order management</h2>
+      <p class="muted">Order listing and live updates can be connected to a fleet-scoped orders endpoint.</p>
+      <div id="orders"></div>
+    </section>
+  </main>
+</body>
+</html>

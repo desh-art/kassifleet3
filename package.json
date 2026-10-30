@@ -1,0 +1,9 @@
+{
+  "name": "kassifleet-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local API backend for the Kassi Fleet portals",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

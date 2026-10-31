@@ -91,4 +91,3 @@ Now, when your ui.js script sends the login details, FastAPI will accept the req
 Let's get this working step-by-step:
 • When you launch this code and click your login button in the browser, what message or error code pops up on your screen?
 AI responses may include mistakes. Learn more
-

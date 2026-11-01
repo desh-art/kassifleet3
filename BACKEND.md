@@ -1,6 +1,6 @@
 # Kassi Fleet backend
 
-The backend uses only Node.js built-in modules. It serves the existing portal files and API from `http://127.0.0.1:3000`, and saves local development data in `data/kassifleet.json`.
+The backend uses Node.js built-in modules. Locally it serves the portals at `http://127.0.0.1:3000` and uses `data/kassifleet.json`. When `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are set, accounts and tracked deliveries use Supabase PostgreSQL instead.
 
 ## Start
 
@@ -12,11 +12,22 @@ npm start
 
 Open `http://127.0.0.1:3000/apps/index.html` for the four-app hub. Use the server URL instead of opening the HTML files directly.
 
-Customers and drivers can register with their name, email, and password. Their accounts are saved locally and they are signed in immediately. Registration stores an email address but does not send a verification message; sending email requires an SMTP provider and credentials.
+Customers and drivers can register with their name, email, and password. Registration stores an email address but does not send a verification message; sending email requires an SMTP provider and credentials.
 
-GitHub Pages only hosts static files and cannot run this Node.js backend. To use login from GitHub Pages, host `server.js` on a Node.js service, set `KF_ALLOWED_ORIGIN` to `https://desh-art.github.io`, and set `window.KF_API_URL` in `apps/js/config.js` to the backend's HTTPS URL. Keep the token secret and database on the backend host.
+## Free Render + Supabase setup
 
-For GitHub Pages, keep the existing root `index.html` app hub and upload the new app files under `apps/` with their folder structure intact. Upload `server.js`, `package.json`, and this guide at the repository root for the separate Node.js host. Do not upload the local `data/` folder.
+1. Create a Supabase free project and run `supabase-schema.sql` in its SQL Editor.
+2. Copy the Supabase project URL and `service_role` key from Project Settings. Keep the key private.
+3. In Render, create a Blueprint from this repository and use `render.yaml`. Enter `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` when prompted. Render generates `KF_TOKEN_SECRET` automatically.
+4. After Render deploys `kassifleet-api`, copy its HTTPS URL into `apps/js/config.js`:
+
+```js
+window.KF_API_URL = "https://kassifleet-api.onrender.com";
+```
+
+5. Commit that config change to GitHub. GitHub Pages serves the app; the Render service handles login and cross-device delivery tracking.
+
+The free Render web service sleeps after 15 minutes without traffic and can take about a minute to wake. Supabase Free has a 500 MB database and can pause after a week of inactivity. These limits make this a free demo/hobby setup, not an always-on production service. Render's free Postgres expires after 30 days, so this setup uses Supabase instead.
 
 ## Optional demo accounts
 
@@ -32,7 +43,7 @@ $env:KF_ADMIN_PASSWORD = "choose-a-long-password"
 npm start
 ```
 
-For deployment, set `KF_HOST`, `PORT`, `KF_TOKEN_SECRET`, `KF_ALLOWED_ORIGIN`, and `KF_DATA_DIR`; use HTTPS and a production database. This local JSON-backed server is intended for development and demonstration, not public internet deployment.
+For deployment, set `KF_HOST`, `PORT`, `KF_TOKEN_SECRET`, `KF_ALLOWED_ORIGIN`, `SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY`. Never commit service-role keys, token secrets, `.env`, or data files. For production uptime and backups, move to paid hosting and a database plan with backups.
 
 ## API
 
@@ -43,3 +54,10 @@ For deployment, set `KF_HOST`, `PORT`, `KF_TOKEN_SECRET`, `KF_ALLOWED_ORIGIN`, a
 - `GET /api04/dispatch/my-deliveries` lists the signed-in driver's orders.
 - `PATCH /api04/dispatch/:id/status` advances an assigned delivery from `assigned` to `picked_up` or from `picked_up` to `delivered`.
 - `GET /api05/admin/overview` returns aggregate counts for an administrator.
+- `POST /api06/tracking/orders` registers a customer delivery for cross-device tracking.
+- `GET /api06/tracking/mine` lists the signed-in customer's tracked deliveries.
+- `GET /api06/tracking/open` and `GET /api06/tracking/my-active` return driver assignments.
+- `PATCH /api06/tracking/orders/:id/claim` atomically assigns an open delivery to a driver.
+- `PATCH /api06/tracking/orders/:id/status` advances a tracked delivery.
+- `PUT /api06/tracking/orders/:id/location` saves the assigned driver's latest GPS fix.
+- `GET /api06/tracking/orders/:id` returns a delivery only to its customer or assigned driver.

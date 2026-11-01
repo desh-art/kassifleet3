@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: kassifleet-api
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: KF_HOST
+        value: 0.0.0.0
+      - key: KF_ALLOWED_ORIGIN
+        value: https://desh-art.github.io
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: KF_TOKEN_SECRET
+        generateValue: true

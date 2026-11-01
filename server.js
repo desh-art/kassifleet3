@@ -5,11 +5,14 @@ const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
 
-const HOST = process.env.KF_HOST || "127.0.0.1";
+const HOST = process.env.KF_HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 3000);
 const DATA_DIR = path.resolve(process.env.KF_DATA_DIR || path.join(__dirname, "data"));
 const DB_FILE = path.join(DATA_DIR, "kassifleet.json");
 const SECRET_FILE = path.join(DATA_DIR, "token-secret");
+const SUPABASE_URL = String(process.env.SUPABASE_URL || "").replace(/\/+$/, "");
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const SUPABASE_ENABLED = !!(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
 const PASSWORD_ITERATIONS = 210000;
 const TOKEN_LIFETIME_SECONDS = 12 * 60 * 60;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -40,6 +43,7 @@ function loadState() {
         { id: "meal-3", vendor_id: "vendor-demo", name: "Pap and Chakalaka", description: "Soft pap with spicy chakalaka", price_cents: 5400, available: true }
       ],
       orders: [],
+      trackingOrders: [],
       nextOrder: 1,
       nextMenuItem: 4
     };
@@ -59,6 +63,7 @@ function loadState() {
   if (!Number.isSafeInteger(saved.nextMenuItem) || saved.nextMenuItem < nextAvailableMenuId) {
     saved.nextMenuItem = nextAvailableMenuId;
   }
+  if (!Array.isArray(saved.trackingOrders)) saved.trackingOrders = [];
   return saved;
 }
 
@@ -79,6 +84,27 @@ function sendJson(res, status, value) {
   res.end(JSON.stringify(value));
 }
 
+async function supabaseRequest(endpoint, options) {
+  if (!SUPABASE_ENABLED) throw httpError(503, "Hosted database is not configured.");
+  const opts = options || {};
+  const response = await fetch(SUPABASE_URL + "/rest/v1/" + endpoint, {
+    method: opts.method || "GET",
+    headers: {
+      apikey: SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: "Bearer " + SUPABASE_SERVICE_ROLE_KEY,
+      "Content-Type": "application/json",
+      Prefer: opts.prefer || "return=representation"
+    },
+    body: opts.body ? JSON.stringify(opts.body) : undefined
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    console.error("Supabase request failed:", response.status, text.slice(0, 500));
+    throw httpError(503, "The hosted database request failed.");
+  }
+  return text ? JSON.parse(text) : null;
+}
+
 function handleCors(req, res) {
   const origin = req.headers.origin;
   if (!origin) return false;
@@ -93,7 +119,7 @@ function handleCors(req, res) {
   }
 
   res.setHeader("Access-Control-Allow-Origin", wildcard ? "*" : origin);
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
   res.setHeader("Vary", "Origin");
   if (req.method === "OPTIONS") {
@@ -171,7 +197,7 @@ function createToken(user) {
   return `${unsigned}.${signature}`;
 }
 
-function authenticate(req, allowedRoles) {
+async function authenticate(req, allowedRoles) {
   const match = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || "");
   if (!match) throw httpError(401, "Sign in to continue.");
   const parts = match[1].split(".");
@@ -191,7 +217,24 @@ function authenticate(req, allowedRoles) {
     throw httpError(401, "Your session has expired. Sign in again.");
   }
 
-  const user = state.users.find(item => item.id === payload.sub && item.role === payload.role);
+  let user;
+  if (SUPABASE_ENABLED) {
+    const rows = await supabaseRequest(
+      "app_users?id=eq." + encodeURIComponent(payload.sub) +
+        "&select=id,name,email,role,vendor_id,password_hash&limit=1"
+    );
+    const row = rows && rows[0];
+    if (row) user = {
+      id: row.id,
+      name: row.name,
+      email: row.email,
+      role: row.role,
+      vendorId: row.vendor_id,
+      passwordHash: row.password_hash
+    };
+  } else {
+    user = state.users.find(item => item.id === payload.sub && item.role === payload.role);
+  }
   if (!user) throw httpError(401, "This account is no longer available.");
   if (allowedRoles && !allowedRoles.includes(user.role)) throw httpError(403, "You do not have permission to do that.");
   return user;
@@ -204,7 +247,25 @@ function publicUser(user) {
 async function seedAccount(prefix, role, extra) {
   const email = String(process.env[`KF_${prefix}_EMAIL`] || "").trim().toLowerCase();
   const password = String(process.env[`KF_${prefix}_PASSWORD`] || "");
-  if (!email || !password || state.users.some(user => user.email === email)) return;
+  if (!email || !password) return;
+  if (SUPABASE_ENABLED) {
+    const existing = await supabaseRequest("app_users?email=eq." + encodeURIComponent(email) + "&select=id&limit=1");
+    if (existing && existing.length) return;
+    await supabaseRequest("app_users", {
+      method: "POST",
+      prefer: "return=minimal",
+      body: [{
+        id: crypto.randomUUID(),
+        name: String(process.env[`KF_${prefix}_NAME`] || prefix[0] + prefix.slice(1).toLowerCase()),
+        email,
+        role,
+        password_hash: await hashPassword(password),
+        vendor_id: extra && extra.vendorId ? extra.vendorId : null
+      }]
+    });
+    return;
+  }
+  if (state.users.some(user => user.email === email)) return;
   const user = {
     id: crypto.randomUUID(),
     name: String(process.env[`KF_${prefix}_NAME`] || prefix[0] + prefix.slice(1).toLowerCase()),
@@ -228,6 +289,22 @@ function activeDeliveriesFor(driverId) {
   return state.orders.filter(order => order.driver_id === driverId && order.status !== "delivered").length;
 }
 
+function trackingOrderDto(order, location) {
+  return {
+    id: order.id,
+    localOrderId: order.local_order_id,
+    status: order.status,
+    shopName: order.shop_name,
+    address: order.address,
+    items: order.items,
+    totalCents: order.total_cents,
+    createdAt: order.created_at,
+    updatedAt: order.updated_at,
+    driverId: order.driver_id,
+    location: location || null
+  };
+}
+
 async function handleApi(req, res, url) {
   const method = req.method;
   const pathname = url.pathname;
@@ -242,6 +319,25 @@ async function handleApi(req, res, url) {
     if (email.length > 254 || !EMAIL_PATTERN.test(email)) throw httpError(400, "Enter a valid email address.");
     if (password.length < 8 || password.length > 128) throw httpError(400, "Password must be between 8 and 128 characters.");
     if (role !== "customer" && role !== "driver") throw httpError(400, "Choose a supported account type.");
+    if (SUPABASE_ENABLED) {
+      const existing = await supabaseRequest("app_users?email=eq." + encodeURIComponent(email) + "&select=id&limit=1");
+      if (existing && existing.length) throw httpError(409, "An account with that email already exists.");
+      const user = {
+        id: crypto.randomUUID(), name, email, role,
+        passwordHash: await hashPassword(password)
+      };
+      await supabaseRequest("app_users", {
+        method: "POST",
+        body: [{
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          password_hash: user.passwordHash
+        }]
+      });
+      return sendJson(res, 201, { user: publicUser(user), accessToken: createToken(user) });
+    }
     if (state.users.some(user => user.email === email)) throw httpError(409, "An account with that email already exists.");
 
     const user = {
@@ -258,18 +354,32 @@ async function handleApi(req, res, url) {
     const body = await readJson(req);
     const email = String(body.email || "").trim().toLowerCase();
     const password = String(body.password || "");
-    const user = state.users.find(item => item.email === email);
+    let user;
+    if (SUPABASE_ENABLED) {
+      const rows = await supabaseRequest("app_users?email=eq." + encodeURIComponent(email) + "&select=id,name,email,role,vendor_id,password_hash&limit=1");
+      const row = rows && rows[0];
+      if (row) user = {
+        id: row.id,
+        name: row.name,
+        email: row.email,
+        role: row.role,
+        vendorId: row.vendor_id,
+        passwordHash: row.password_hash
+      };
+    } else {
+      user = state.users.find(item => item.email === email);
+    }
     if (!user || !(await verifyPassword(password, user.passwordHash))) throw httpError(401, "Email or password is incorrect.");
     return sendJson(res, 200, { user: publicUser(user), accessToken: createToken(user) });
   }
 
   if (method === "GET" && pathname === "/api02/menu") {
-    authenticate(req, ["customer", "vendor", "platform_admin"]);
+    await authenticate(req, ["customer", "vendor", "platform_admin"]);
     return sendJson(res, 200, state.menu.filter(item => item.available));
   }
 
   if (method === "POST" && pathname === "/api02/menu") {
-    const user = authenticate(req, ["vendor"]);
+    const user = await authenticate(req, ["vendor"]);
     const body = await readJson(req);
     const name = String(body.name || "").trim();
     const price = Number(body.priceCents);
@@ -290,7 +400,7 @@ async function handleApi(req, res, url) {
   }
 
   if (method === "POST" && pathname === "/api03/orders") {
-    const user = authenticate(req, ["customer"]);
+    const user = await authenticate(req, ["customer"]);
     const body = await readJson(req);
     const address = String(body.deliveryAddress || "").trim();
     const requestedItems = Array.isArray(body.items) ? body.items : [];
@@ -331,7 +441,7 @@ async function handleApi(req, res, url) {
   }
 
   if (method === "GET" && pathname === "/api04/dispatch/my-deliveries") {
-    const user = authenticate(req, ["driver"]);
+    const user = await authenticate(req, ["driver"]);
     const orders = state.orders
       .filter(order => order.driver_id === user.id)
       .map(({ id, delivery_address, status, created_at }) => ({ id, delivery_address, status, created_at }));
@@ -340,7 +450,7 @@ async function handleApi(req, res, url) {
 
   const statusMatch = /^\/api04\/dispatch\/([^/]+)\/status$/.exec(pathname);
   if (method === "PATCH" && statusMatch) {
-    const user = authenticate(req, ["driver"]);
+    const user = await authenticate(req, ["driver"]);
     const body = await readJson(req);
     const order = state.orders.find(item => item.id === decodeURIComponent(statusMatch[1]) && item.driver_id === user.id);
     if (!order) throw httpError(404, "Delivery not found.");
@@ -353,8 +463,180 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, { id: order.id, status: order.status });
   }
 
+  if (method === "POST" && pathname === "/api06/tracking/orders") {
+    const user = await authenticate(req, ["customer"]);
+    const body = await readJson(req);
+    const localOrderId = String(body.localOrderId || "").trim();
+    const shopName = String(body.shopName || "").trim();
+    const address = body.address && typeof body.address === "object" && !Array.isArray(body.address) ? body.address : null;
+    const items = Array.isArray(body.items) ? body.items : [];
+    const totalCents = Number(body.totalCents);
+    if (!localOrderId || localOrderId.length > 120 || !shopName || shopName.length > 160 || !address || !items.length || items.length > 50 || !Number.isSafeInteger(totalCents) || totalCents < 0) {
+      throw httpError(400, "Provide a valid delivery order to track.");
+    }
+    if (body.fulfilment === "collect") throw httpError(400, "Collection orders do not need driver tracking.");
+
+    const order = {
+      id: crypto.randomUUID(),
+      customer_id: user.id,
+      driver_id: null,
+      local_order_id: localOrderId,
+      status: "new",
+      shop_name: shopName,
+      address,
+      items,
+      total_cents: totalCents,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    };
+    if (SUPABASE_ENABLED) {
+      const rows = await supabaseRequest("tracking_orders", { method: "POST", body: [order] });
+      return sendJson(res, 201, trackingOrderDto(rows[0] || order, null));
+    }
+    state.trackingOrders.unshift(order);
+    saveState();
+    return sendJson(res, 201, trackingOrderDto(order, null));
+  }
+
+  if (method === "GET" && pathname === "/api06/tracking/open") {
+    await authenticate(req, ["driver"]);
+    const orders = SUPABASE_ENABLED
+      ? await supabaseRequest("tracking_orders?status=eq.new&driver_id=is.null&select=id,local_order_id,status,shop_name,address,items,total_cents,created_at,updated_at,driver_id&order=created_at.asc")
+      : state.trackingOrders.filter(order => order.status === "new" && !order.driver_id);
+    return sendJson(res, 200, orders.map(order => trackingOrderDto(order, null)));
+  }
+
+  if (method === "GET" && pathname === "/api06/tracking/mine") {
+    const user = await authenticate(req, ["customer"]);
+    const orders = SUPABASE_ENABLED
+      ? await supabaseRequest("tracking_orders?customer_id=eq." + encodeURIComponent(user.id) + "&select=id,customer_id,driver_id,local_order_id,status,shop_name,address,items,total_cents,created_at,updated_at&order=created_at.desc&limit=100")
+      : state.trackingOrders.filter(order => order.customer_id === user.id).slice(0, 100);
+    const results = await Promise.all(orders.map(async order => {
+      let location = order.location || null;
+      if (SUPABASE_ENABLED && order.driver_id) {
+        const locations = await supabaseRequest("driver_locations?order_id=eq." + encodeURIComponent(order.id) + "&select=latitude,longitude,accuracy_m,updated_at&limit=1");
+        if (locations.length) location = { latitude: locations[0].latitude, longitude: locations[0].longitude, accuracy: locations[0].accuracy_m, updatedAt: locations[0].updated_at };
+      }
+      return trackingOrderDto(order, location);
+    }));
+    return sendJson(res, 200, results);
+  }
+
+  if (method === "GET" && pathname === "/api06/tracking/my-active") {
+    const user = await authenticate(req, ["driver"]);
+    const orders = SUPABASE_ENABLED
+      ? await supabaseRequest("tracking_orders?driver_id=eq." + encodeURIComponent(user.id) + "&status=in.(claimed,picked_up)&select=id,local_order_id,status,shop_name,address,items,total_cents,created_at,updated_at,driver_id&order=updated_at.desc&limit=1")
+      : state.trackingOrders.filter(order => order.driver_id === user.id && ["claimed", "picked_up"].includes(order.status)).slice(0, 1);
+    if (!orders.length) return sendJson(res, 200, null);
+    const order = orders[0];
+    let location = order.location || null;
+    if (SUPABASE_ENABLED) {
+      const locations = await supabaseRequest("driver_locations?order_id=eq." + encodeURIComponent(order.id) + "&select=latitude,longitude,accuracy_m,updated_at&limit=1");
+      if (locations.length) location = { latitude: locations[0].latitude, longitude: locations[0].longitude, accuracy: locations[0].accuracy_m, updatedAt: locations[0].updated_at };
+    }
+    return sendJson(res, 200, trackingOrderDto(order, location));
+  }
+
+  const trackingMatch = /^\/api06\/tracking\/orders\/([^/]+)(?:\/(claim|status|location))?$/.exec(pathname);
+  if (trackingMatch) {
+    const trackingId = decodeURIComponent(trackingMatch[1]);
+    const action = trackingMatch[2] || "detail";
+
+    if (method === "GET" && action === "detail") {
+      const user = await authenticate(req, ["customer", "driver"]);
+      const orders = SUPABASE_ENABLED
+        ? await supabaseRequest("tracking_orders?id=eq." + encodeURIComponent(trackingId) + "&select=id,customer_id,driver_id,local_order_id,status,shop_name,address,items,total_cents,created_at,updated_at&limit=1")
+        : state.trackingOrders.filter(order => order.id === trackingId);
+      const order = orders[0];
+      if (!order) throw httpError(404, "Tracked delivery not found.");
+      if ((user.role === "customer" && order.customer_id !== user.id) || (user.role === "driver" && order.driver_id !== user.id)) {
+        throw httpError(403, "You do not have access to this delivery.");
+      }
+      let location = order.location || null;
+      if (SUPABASE_ENABLED) {
+        const locations = await supabaseRequest("driver_locations?order_id=eq." + encodeURIComponent(order.id) + "&select=latitude,longitude,accuracy_m,updated_at&limit=1");
+        if (locations.length) location = { latitude: locations[0].latitude, longitude: locations[0].longitude, accuracy: locations[0].accuracy_m, updatedAt: locations[0].updated_at };
+      }
+      return sendJson(res, 200, trackingOrderDto(order, location));
+    }
+
+    if (method === "PATCH" && action === "claim") {
+      const user = await authenticate(req, ["driver"]);
+      let claimed;
+      if (SUPABASE_ENABLED) {
+        const rows = await supabaseRequest("tracking_orders?id=eq." + encodeURIComponent(trackingId) + "&status=eq.new&driver_id=is.null", {
+          method: "PATCH",
+          body: { driver_id: user.id, status: "claimed", updated_at: new Date().toISOString() }
+        });
+        claimed = rows[0];
+      } else {
+        claimed = state.trackingOrders.find(order => order.id === trackingId && order.status === "new" && !order.driver_id);
+        if (claimed) {
+          claimed.driver_id = user.id;
+          claimed.status = "claimed";
+          claimed.updated_at = new Date().toISOString();
+          saveState();
+        }
+      }
+      if (!claimed) throw httpError(409, "This delivery was already claimed or is no longer available.");
+      return sendJson(res, 200, trackingOrderDto(claimed, null));
+    }
+
+    if (method === "PATCH" && action === "status") {
+      const user = await authenticate(req, ["driver"]);
+      const body = await readJson(req);
+      const rows = SUPABASE_ENABLED
+        ? await supabaseRequest("tracking_orders?id=eq." + encodeURIComponent(trackingId) + "&driver_id=eq." + encodeURIComponent(user.id) + "&select=id,driver_id,status")
+        : state.trackingOrders.filter(order => order.id === trackingId && order.driver_id === user.id);
+      const order = rows[0];
+      if (!order) throw httpError(404, "Tracked delivery not found.");
+      const next = order.status === "claimed" ? "picked_up" : order.status === "picked_up" ? "delivered" : null;
+      if (!next || body.status !== next) throw httpError(409, "That delivery status change is not allowed.");
+      if (SUPABASE_ENABLED) {
+        await supabaseRequest("tracking_orders?id=eq." + encodeURIComponent(trackingId) + "&driver_id=eq." + encodeURIComponent(user.id), {
+          method: "PATCH",
+          body: { status: next, updated_at: new Date().toISOString() },
+          prefer: "return=minimal"
+        });
+      } else {
+        order.status = next;
+        order.updated_at = new Date().toISOString();
+        saveState();
+      }
+      return sendJson(res, 200, { id: trackingId, status: next });
+    }
+
+    if (method === "PUT" && action === "location") {
+      const user = await authenticate(req, ["driver"]);
+      const body = await readJson(req);
+      const latitude = Number(body.latitude);
+      const longitude = Number(body.longitude);
+      const accuracy = Number(body.accuracy);
+      if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90 || !Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+        throw httpError(400, "Provide valid GPS coordinates.");
+      }
+      const orders = SUPABASE_ENABLED
+        ? await supabaseRequest("tracking_orders?id=eq." + encodeURIComponent(trackingId) + "&driver_id=eq." + encodeURIComponent(user.id) + "&status=in.(claimed,picked_up)&select=id")
+        : state.trackingOrders.filter(order => order.id === trackingId && order.driver_id === user.id && ["claimed", "picked_up"].includes(order.status));
+      if (!orders.length) throw httpError(404, "Active tracked delivery not found.");
+      const location = { order_id: trackingId, driver_id: user.id, latitude, longitude, accuracy_m: Number.isFinite(accuracy) ? accuracy : null, updated_at: new Date().toISOString() };
+      if (SUPABASE_ENABLED) {
+        await supabaseRequest("driver_locations?on_conflict=order_id", {
+          method: "POST",
+          body: [location],
+          prefer: "resolution=merge-duplicates,return=minimal"
+        });
+      } else {
+        orders[0].location = { latitude, longitude, accuracy: location.accuracy_m, updatedAt: location.updated_at };
+        orders[0].updated_at = location.updated_at;
+        saveState();
+      }
+      return sendJson(res, 204, {});
+    }
+  }
+
   if (method === "GET" && pathname === "/api05/admin/overview") {
-    authenticate(req, ["platform_admin"]);
+    await authenticate(req, ["platform_admin"]);
     return sendJson(res, 200, {
       customers: state.users.filter(user => user.role === "customer").length,
       drivers: state.users.filter(user => user.role === "driver").length,
@@ -407,6 +689,12 @@ function serveStatic(req, res, url) {
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${HOST}:${PORT}`);
+    if (req.method === "GET" && url.pathname === "/healthz") {
+      if (process.env.NODE_ENV === "production" && !SUPABASE_ENABLED) {
+        return sendJson(res, 503, { ok: false, error: "Hosted database is not configured." });
+      }
+      return sendJson(res, 200, { ok: true, database: SUPABASE_ENABLED ? "supabase" : "local" });
+    }
     if (url.pathname.startsWith("/api")) {
       if (handleCors(req, res)) return;
       await handleApi(req, res, url);

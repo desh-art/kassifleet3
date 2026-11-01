@@ -6,7 +6,9 @@
   var KF = window.KF;
   var money = UI.money;
   var esc = UI.escape;
-  var API = (window.KF_API_URL || (location.protocol === "file:" ? "http://127.0.0.1:3000" : location.origin)).replace(/\/+$/, "");
+  var localOrigin = location.protocol === "file:" ? "http://127.0.0.1:3000" :
+    /^(localhost|127\.0\.0\.1)$/.test(location.hostname) ? location.origin : "";
+  var API = String(window.KF_API_URL || localOrigin).replace(/\/+$/, "");
   var SESSION_KEY = "kf.customer.session";
 
   var header = document.getElementById("header");
@@ -14,6 +16,10 @@
   var bottom = document.getElementById("bottom");
   var customerSession = null;
   var authMode = "login";
+  var remoteTrackingOrderId = null;
+  var remoteTrackingPoller = null;
+  var remoteTrackingData = null;
+  var remoteOrders = [];
 
   function renderAuth(message) {
     header.className = "app-header";
@@ -59,6 +65,7 @@
       saved = null;
     }
     if (!saved || !saved.accessToken || !saved.user) return renderAuth("");
+    if (!API) return renderAuth("Customer login needs the deployed backend URL. Set KF_API_URL in apps/js/config.js.");
 
     try {
       var response = await fetch(API + "/api02/menu", {
@@ -135,6 +142,7 @@
     var parts = raw.split("/");
     var name = parts[0] || "home";
     if (name === "r") name = "restaurant";
+    if (name === "remote-track") return { name: name, id: decodeURIComponent(parts[1] || "") };
     return { name: name, id: parts[1] || null };
   }
 
@@ -203,6 +211,18 @@
             '<div class="meta truncate">' + (collect ? esc(view.id) + " · " : "") +
               esc(order ? vendorById(order.vendorId).name : "") + "</div></div>" +
           "</div>" +
+          '<button class="icon-btn" data-nav="#/home" aria-label="Browse restaurants"><i class="ph ph-house"></i></button>' +
+        "</div>";
+      return;
+    }
+
+    if (view.name === "remote-track") {
+      header.className = "app-header app-header--line";
+      header.innerHTML =
+        '<div class="header-row">' +
+          '<button class="icon-btn" data-nav="#/orders" aria-label="Back to your orders"><i class="ph ph-arrow-left"></i></button>' +
+          '<div class="header-title" style="flex:1"><div style="min-width:0"><div class="h2">Live delivery</div>' +
+            '<div class="meta truncate">' + esc(view.id) + "</div></div></div>" +
           '<button class="icon-btn" data-nav="#/home" aria-label="Browse restaurants"><i class="ph ph-house"></i></button>' +
         "</div>";
       return;
@@ -943,6 +963,78 @@
       '<div style="height:20px"></div>';
   }
 
+  function stopRemoteTracking() {
+    if (remoteTrackingPoller) window.clearInterval(remoteTrackingPoller);
+    remoteTrackingPoller = null;
+    remoteTrackingOrderId = null;
+  }
+
+  function remoteTrackingHtml() {
+    if (!remoteTrackingData) {
+      return '<div class="h3">Live delivery tracker</div>' +
+        '<div class="meta" role="status" aria-live="polite" style="margin-top:4px">Connecting to the delivery tracker…</div>';
+    }
+
+    var statusLabels = {
+      new: "Finding a driver",
+      claimed: "Driver assigned",
+      picked_up: "On the way",
+      delivered: "Delivered"
+    };
+    var location = remoteTrackingData.location;
+    var ageMs = location ? Date.now() - new Date(location.updatedAt).getTime() : Infinity;
+    var isLive = ageMs >= 0 && ageMs <= 30000;
+
+    return '<div class="h3">Live delivery tracker</div>' +
+      '<div class="meta" role="status" aria-live="polite" style="margin-top:4px">' +
+        esc(statusLabels[remoteTrackingData.status] || remoteTrackingData.status) + "</div>" +
+      (location
+        ? '<div class="meta num" style="margin-top:5px">' + (isLive ? "Live · updated " : "Last fix · updated ") +
+            esc(UI.ago(location.updatedAt)) + (Number.isFinite(location.accuracy) ? " · ±" + Math.round(location.accuracy) + " m" : "") + "</div>" +
+          '<div class="meta num" style="margin-top:3px">' + location.latitude.toFixed(5) + ", " + location.longitude.toFixed(5) + "</div>" +
+          '<a class="btn btn--quiet btn--block" style="margin-top:10px" href="https://www.openstreetmap.org/?mlat=' +
+            location.latitude + "&mlon=" + location.longitude + '#map=17/' + location.latitude + "/" + location.longitude +
+            '" target="_blank" rel="noopener noreferrer"><i class="ph ph-map-trifold"></i>View driver on map</a>'
+        : '<div class="meta" style="margin-top:4px">' + (remoteTrackingData.status === "new"
+            ? "Driver GPS appears here after a driver claims this order and starts GPS."
+            : "Waiting for the driver to start GPS sharing.") + "</div>");
+  }
+
+  function refreshRemoteTracking() {
+    if (!customerSession || !remoteTrackingOrderId) return;
+    fetch(API + "/api06/tracking/orders/" + encodeURIComponent(remoteTrackingOrderId), {
+      headers: { Authorization: "Bearer " + customerSession.accessToken }
+    }).then(function (response) {
+      if (!response.ok) throw new Error("Tracking request failed");
+      return response.json();
+    }).then(function (data) {
+      remoteTrackingData = data;
+      var panel = document.getElementById("remoteTrackingPanel");
+      if (panel) panel.innerHTML = remoteTrackingHtml();
+    }).catch(function () {
+      var panel = document.getElementById("remoteTrackingPanel");
+      if (panel && !remoteTrackingData) {
+        panel.innerHTML = '<div class="h3">Live delivery tracker</div>' +
+          '<div class="meta" role="status" aria-live="polite" style="margin-top:4px">Tracking server is unavailable right now.</div>';
+      }
+    });
+  }
+
+  function startRemoteTracking(order) {
+    var trackingId = typeof order === "string" ? order : order && order.remoteTrackingId;
+    if (!trackingId || !customerSession) {
+      stopRemoteTracking();
+      remoteTrackingData = null;
+      return;
+    }
+    if (remoteTrackingOrderId === trackingId && remoteTrackingPoller) return;
+    stopRemoteTracking();
+    remoteTrackingOrderId = trackingId;
+    remoteTrackingData = null;
+    refreshRemoteTracking();
+    remoteTrackingPoller = window.setInterval(refreshRemoteTracking, 7000);
+  }
+
   function renderTrack(view) {
     var order = KF.order(view.id);
     if (!order) {
@@ -956,6 +1048,7 @@
     }
 
     var shop = vendorById(order.vendorId);
+    startRemoteTracking(order);
     var driver = order.driverId ? KF.driver(order.driverId) : null;
     var driverLocation = driver && driver.location;
     var locationAgeMs = driverLocation ? Date.now() - new Date(driverLocation.updatedAt).getTime() : Infinity;
@@ -1100,7 +1193,9 @@
           '<div class="empty__title">No orders yet</div>' +
           '<div class="empty__body">Your orders and their status will show here.</div>' +
           '<button class="btn btn--primary" style="margin-top:14px" data-nav="#/home">Find food</button>' +
-        "</div></div></div>";
+        "</div></div></div>" +
+        '<div class="pad section-gap"><div id="remoteOrderList"></div></div>';
+      loadRemoteOrders();
       return;
     }
 
@@ -1125,7 +1220,44 @@
             "</button>"
           );
         }).join("") +
-      "</div></div>";
+      "</div></div>" +
+      '<div class="pad section-gap"><div id="remoteOrderList"></div></div>';
+    loadRemoteOrders();
+  }
+
+  function loadRemoteOrders() {
+    if (!API || !customerSession) return;
+    fetch(API + "/api06/tracking/mine", {
+      headers: { Authorization: "Bearer " + customerSession.accessToken }
+    }).then(function (response) {
+      if (!response.ok) throw new Error("Could not load tracked orders.");
+      return response.json();
+    }).then(function (orders) {
+      remoteOrders = orders;
+      var host = document.getElementById("remoteOrderList");
+      if (!host || !orders.length) return;
+      host.innerHTML = '<h2 class="h2" style="margin-bottom:8px">Tracked deliveries</h2><div class="list">' +
+        orders.map(function (order) {
+          var statusLabels = { new: "Finding a driver", claimed: "Driver assigned", picked_up: "On the way", delivered: "Delivered" };
+          return '<button class="row" data-nav="#/remote-track/' + encodeURIComponent(order.id) + '">' +
+            '<span class="row__body"><span class="row__title" style="display:block">' + esc(order.shopName) + "</span>" +
+              '<span class="meta">' + esc(statusLabels[order.status] || order.status) + " · " + esc(order.localOrderId) + "</span></span>" +
+            '<i class="ph ph-caret-right" style="color:var(--muted-2);font-size:12px"></i>' +
+          "</button>";
+        }).join("") + "</div>";
+    }).catch(function () {
+      var host = document.getElementById("remoteOrderList");
+      if (host) host.innerHTML = '<div class="list-note">Live tracking history is unavailable while the backend is offline.</div>';
+    });
+  }
+
+  function renderRemoteTrack(view) {
+    var trackingId = view.id;
+    remoteTrackingData = null;
+    main.innerHTML = '<div class="pad section-gap"><div class="card card--pad" id="remoteTrackingPanel">' +
+      remoteTrackingHtml() + "</div></div>";
+    startRemoteTracking(trackingId);
+    refreshRemoteTracking();
   }
 
   function renderAccount() {
@@ -1206,7 +1338,7 @@
       return;
     }
 
-    if (view.name === "track" || view.name === "checkout") {
+    if (view.name === "track" || view.name === "remote-track" || view.name === "checkout") {
       bottom.innerHTML = "";
       return;
     }
@@ -1252,6 +1384,7 @@
       return;
     }
     var view = route();
+    if (view.name !== "track" && view.name !== "remote-track") stopRemoteTracking();
     var key = view.name + "/" + (view.id || "");
     renderHeader(view);
 
@@ -1259,6 +1392,7 @@
     else if (view.name === "restaurant") renderRestaurant(view);
     else if (view.name === "checkout") renderCheckout();
     else if (view.name === "track") renderTrack(view);
+    else if (view.name === "remote-track") renderRemoteTrack(view);
     else if (view.name === "orders") renderOrders();
     else if (view.name === "account") renderAccount();
     else renderHome();
@@ -1278,6 +1412,10 @@
     event.preventDefault();
     var button = event.target.querySelector('button[type="submit"]');
     if (button) button.disabled = true;
+    if (!API) {
+      renderAuth("Customer login needs the deployed backend URL. Set KF_API_URL in apps/js/config.js.");
+      return;
+    }
     var body = Object.fromEntries(new FormData(event.target));
     if (authMode === "register") body.role = "customer";
 
@@ -1397,7 +1535,7 @@
     });
   }
 
-  function placeOrder() {
+  async function placeOrder() {
     var result = KF.placeOrder({
       tip: uiState.tip,
       payment: uiState.payment,
@@ -1409,10 +1547,38 @@
       return;
     }
     uiState.note = "";
+    var trackingError = "";
+    if (result.order.fulfilment === "delivery" && customerSession && API) {
+      try {
+        var response = await fetch(API + "/api06/tracking/orders", {
+          method: "POST",
+          headers: {
+            Authorization: "Bearer " + customerSession.accessToken,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            localOrderId: result.order.id,
+            shopName: KF.vendor(result.order.vendorId).name,
+            address: result.order.address,
+            items: result.order.items,
+            totalCents: Math.round(result.order.total * 100),
+            fulfilment: result.order.fulfilment
+          })
+        });
+        var trackedOrder = await response.json();
+        if (!response.ok) throw new Error(trackedOrder.error || "Tracking unavailable");
+        KF.setRemoteTrackingId(result.order.id, trackedOrder.id);
+      } catch (error) {
+        trackingError = "Live tracking could not start. Check the backend connection.";
+      }
+    } else if (result.order.fulfilment === "delivery") {
+      trackingError = "Live tracking is unavailable until the backend URL is configured.";
+    }
     var collect = result.order.fulfilment === "collect";
     UI.toast(
       (collect ? "Collection order sent to " : "Order sent to ") + KF.vendor(result.order.vendorId).name
     );
+    if (trackingError) UI.toast(trackingError);
     go("#/track/" + result.order.id);
   }
 

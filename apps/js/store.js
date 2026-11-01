@@ -777,6 +777,14 @@
     })[0];
   }
 
+  function setRemoteTrackingId(orderId, trackingId) {
+    var target = order(orderId);
+    if (!target || !trackingId) return false;
+    target.remoteTrackingId = String(trackingId);
+    save();
+    return true;
+  }
+
   function myDriver() {
     return driver(state.driver.id);
   }
@@ -1497,6 +1505,7 @@
     vendor: vendor,
     driver: driver,
     order: order,
+    setRemoteTrackingId: setRemoteTrackingId,
     myDriver: myDriver,
     setDriverIdentity: setDriverIdentity,
     basketView: basketView,

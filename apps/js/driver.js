@@ -6,7 +6,9 @@
   var KF = window.KF;
   var money = UI.money;
   var esc = UI.escape;
-  var API = (window.KF_API_URL || (location.protocol === "file:" ? "http://127.0.0.1:3000" : location.origin)).replace(/\/+$/, "");
+  var localOrigin = location.protocol === "file:" ? "http://127.0.0.1:3000" :
+    /^(localhost|127\.0\.0\.1)$/.test(location.hostname) ? location.origin : "";
+  var API = String(window.KF_API_URL || localOrigin).replace(/\/+$/, "");
   var SESSION_KEY = "kf.driver.session";
 
   var header = document.getElementById("header");
@@ -17,6 +19,10 @@
   var gpsWatchId = null;
   var gpsTrail = [];
   var lastLocationPublishedAt = 0;
+  var remoteOrders = [];
+  var remoteActiveOrder = null;
+  var remotePoller = null;
+  var remoteMessage = "";
   var liveMap = null;
   var liveMarker = null;
   var liveTrailLayer = null;
@@ -55,6 +61,7 @@
     }
     driverSession = session;
     sessionStorage.setItem(SESSION_KEY, JSON.stringify(session));
+    startRemotePolling();
     render();
   }
 
@@ -66,6 +73,7 @@
       saved = null;
     }
     if (!saved || !saved.accessToken || !saved.user) return renderLogin("");
+    if (!API) return renderLogin("Driver login needs the deployed backend URL. Set KF_API_URL in apps/js/config.js.");
 
     try {
       var response = await fetch(API + "/api04/dispatch/my-deliveries", {
@@ -84,6 +92,40 @@
     if (gpsWatchId !== null && navigator.geolocation) navigator.geolocation.clearWatch(gpsWatchId);
     gpsWatchId = null;
     gpsMessage = message || "GPS is off";
+  }
+
+  function stopRemotePolling() {
+    if (remotePoller) window.clearInterval(remotePoller);
+    remotePoller = null;
+  }
+
+  async function loadRemoteDeliveries() {
+    if (!driverSession || !API) return;
+    try {
+      var headers = { Authorization: "Bearer " + driverSession.accessToken };
+      var results = await Promise.all([
+        fetch(API + "/api06/tracking/open", { headers: headers }),
+        fetch(API + "/api06/tracking/my-active", { headers: headers })
+      ]);
+      if (!results[0].ok || !results[1].ok) throw new Error("Could not load online deliveries.");
+      remoteOrders = await results[0].json();
+      var nextActive = await results[1].json();
+      var changed = (remoteActiveOrder && !nextActive) || (!remoteActiveOrder && nextActive) ||
+        (remoteActiveOrder && nextActive && (remoteActiveOrder.id !== nextActive.id || remoteActiveOrder.status !== nextActive.status));
+      remoteActiveOrder = nextActive;
+      remoteMessage = "";
+      if (changed) render();
+      else if (route() === "nearby") renderRemoteOrderList();
+    } catch (error) {
+      remoteMessage = "Online tracking is unavailable. Check your connection.";
+      if (route() === "nearby") renderRemoteOrderList();
+    }
+  }
+
+  function startRemotePolling() {
+    stopRemotePolling();
+    loadRemoteDeliveries();
+    remotePoller = window.setInterval(loadRemoteDeliveries, 10000);
   }
 
   function destroyLiveMap() {
@@ -220,8 +262,22 @@
         gpsTrail.push(coordinates);
         if (gpsTrail.length > 500) gpsTrail.shift();
       }
-      if (Date.now() - lastLocationPublishedAt >= 5000 && KF.updateDriverLocation(me().id, currentPosition)) {
-        lastLocationPublishedAt = Date.now();
+      var now = Date.now();
+      if (now - lastLocationPublishedAt >= 5000) {
+        lastLocationPublishedAt = now;
+        KF.updateDriverLocation(me().id, currentPosition);
+        if (remoteActiveOrder && driverSession && API) {
+          fetch(API + "/api06/tracking/orders/" + encodeURIComponent(remoteActiveOrder.id) + "/location", {
+            method: "PUT",
+            headers: {
+              Authorization: "Bearer " + driverSession.accessToken,
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify(currentPosition)
+          }).catch(function () {
+            remoteMessage = "Could not publish GPS to the tracking server.";
+          });
+        }
       }
       gpsMessage = "GPS tracking is on";
       if (!liveMap) renderCurrentView();
@@ -278,7 +334,7 @@
           '<button class="icon-btn" data-back aria-label="Back to nearby orders"><i class="ph ph-arrow-left"></i></button>' +
           '<div class="header-title" style="flex:1">' +
             '<div style="min-width:0"><div class="h2">Active route</div>' +
-            '<div class="meta num">' + (activeOrder() ? activeOrder().id : "No order") + "</div></div>" +
+            '<div class="meta num">' + (remoteActiveOrder ? remoteActiveOrder.localOrderId : activeOrder() ? activeOrder().id : "No order") + "</div></div>" +
           "</div>" +
             '<button class="icon-btn" data-action="logout" aria-label="Sign out"><i class="ph ph-sign-out"></i></button>' +
           '<a class="icon-btn" href="./index.html" aria-label="All Kassifleet apps"><i class="ph ph-squares-four"></i></a>' +
@@ -356,6 +412,8 @@
           '<i class="ph ph-map-trifold"></i>View on map</a>' +
       "</div></div>" +
 
+      '<div class="pad section-gap"><div id="remoteOrders"></div></div>' +
+
       (!online
         ? '<div class="pad" style="margin-top:12px"><div class="notice notice--warn"><i class="ph ph-warning-circle"></i><span>You are offline. Go online to see pickups and claim orders.</span></div></div>'
         : "") +
@@ -413,6 +471,81 @@
       '<div style="height:18px"></div>';
     initializeLiveMap("nearbyMap");
     updateGpsReadout();
+    renderRemoteOrderList();
+  }
+
+  function renderRemoteOrderList() {
+    var host = document.getElementById("remoteOrders");
+    if (!host) return;
+    if (remoteActiveOrder) {
+      host.innerHTML = '<div class="active-card"><div class="h3">Online delivery</div>' +
+        '<div class="meta" style="margin-top:4px">' + esc(remoteActiveOrder.shopName) + " · " + esc(remoteActiveOrder.localOrderId) +
+          " · " + esc(remoteActiveOrder.status) + "</div>" +
+        '<button class="btn btn--primary btn--block" style="margin-top:10px" data-nav="route">Continue route</button></div>';
+      return;
+    }
+    host.innerHTML =
+      '<div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:8px">' +
+        '<h2 class="h2">Online deliveries</h2><span class="meta num">' + remoteOrders.length + " ready</span></div>" +
+      (remoteMessage ? '<div class="notice notice--warn"><i class="ph ph-warning-circle"></i><span>' + esc(remoteMessage) + "</span></div>" : "") +
+      (remoteOrders.length
+        ? '<div class="list">' + remoteOrders.map(function (order) {
+            var area = [order.address.suburb, order.address.township].filter(Boolean).join(", ");
+            return '<div class="row"><span class="row__body"><span class="row__title" style="display:block">' + esc(order.shopName) + "</span>" +
+              '<span class="row__lines"><span>' + esc(area || order.address.street || "Delivery") + "</span>" +
+                '<span class="sep"></span><span class="num">' + esc(order.localOrderId) + "</span></span></span>" +
+              '<button class="btn btn--green btn--sm" data-remote-claim="' + esc(order.id) + '">Claim</button></div>';
+          }).join("") + "</div>"
+        : '<div class="list-note">New customer deliveries will appear here.</div>');
+  }
+
+  async function claimRemoteDelivery(id) {
+    try {
+      var response = await fetch(API + "/api06/tracking/orders/" + encodeURIComponent(id) + "/claim", {
+        method: "PATCH",
+        headers: { Authorization: "Bearer " + driverSession.accessToken }
+      });
+      var order = await response.json();
+      if (!response.ok) throw new Error(order.error || "Could not claim this delivery.");
+      remoteActiveOrder = order;
+      remoteOrders = remoteOrders.filter(function (candidate) { return candidate.id !== id; });
+      gpsTrail = [];
+      gpsMessage = "GPS is off";
+      go("route");
+    } catch (error) {
+      UI.toast(error.message || "Could not claim this delivery.");
+      loadRemoteDeliveries();
+    }
+  }
+
+  async function advanceRemoteDelivery() {
+    if (!remoteActiveOrder) return;
+    var next = remoteActiveOrder.status === "claimed" ? "picked_up" : remoteActiveOrder.status === "picked_up" ? "delivered" : null;
+    if (!next) return;
+    try {
+      var response = await fetch(API + "/api06/tracking/orders/" + encodeURIComponent(remoteActiveOrder.id) + "/status", {
+        method: "PATCH",
+        headers: {
+          Authorization: "Bearer " + driverSession.accessToken,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ status: next })
+      });
+      var result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not update this delivery.");
+      if (next === "delivered") {
+        stopGps("Delivery complete");
+        currentPosition = null;
+        remoteActiveOrder = null;
+        go("nearby");
+      } else {
+        remoteActiveOrder.status = next;
+        render();
+      }
+      loadRemoteDeliveries();
+    } catch (error) {
+      UI.toast(error.message || "Could not update this delivery.");
+    }
   }
 
   /* ---------------- Claim review ---------------- */
@@ -470,6 +603,7 @@
 
   function renderRoute() {
     destroyLiveMap();
+    if (remoteActiveOrder) return renderRemoteRoute();
     var order = activeOrder();
     if (!order) {
       stopGps();
@@ -599,6 +733,47 @@
     updateGpsReadout();
   }
 
+  function renderRemoteRoute() {
+    var order = remoteActiveOrder;
+    var address = order.address || {};
+    var destinationPosition = order.status === "picked_up" && Number.isFinite(address.latitude) && Number.isFinite(address.longitude)
+      ? { latitude: address.latitude, longitude: address.longitude }
+      : null;
+    currentDestination = destinationPosition
+      ? destinationPosition.latitude + "," + destinationPosition.longitude
+      : [address.street, address.suburb, address.township].filter(Boolean).join(", ") || order.shopName;
+
+    main.innerHTML =
+      '<div class="pad" style="padding-top:12px"><div class="banner">' +
+        '<div class="banner__icon"><i class="ph-fill ph-navigation-arrow"></i></div>' +
+        '<div class="banner__body"><div class="banner__title">' +
+          (order.status === "picked_up" ? "Deliver to customer" : "Collect from " + esc(order.shopName)) + "</div>" +
+          '<div class="banner__sub">Order ' + esc(order.localOrderId) + " · " + esc(order.status) + "</div></div>" +
+      "</div></div>" +
+      '<div class="pad" style="margin-top:12px"><div id="routeMap" class="map map--tall" role="application" aria-label="Live GPS map"></div></div>' +
+      '<div class="pad" style="margin-top:12px"><div class="card card--pad">' +
+        '<div class="h3">Current location</div>' +
+        '<div class="meta" data-gps-status role="status" aria-live="polite" style="margin-top:4px">' + esc(gpsMessage) + "</div>" +
+        '<div class="meta num" data-gps-coordinates style="margin-top:4px">' +
+          (currentPosition ? currentPosition.latitude.toFixed(5) + ", " + currentPosition.longitude.toFixed(5) : "") + "</div>" +
+        '<button class="btn btn--quiet btn--block" style="margin-top:10px" data-action="gps">' +
+          (gpsWatchId === null ? "Start GPS sharing" : "Stop GPS sharing") + "</button>" +
+        '<a id="gpsDirectionsLink" class="btn btn--primary btn--block" style="margin-top:8px" target="_blank" rel="noopener noreferrer">' +
+          '<i class="ph ph-navigation-arrow"></i>Open directions</a>' +
+      "</div></div>" +
+      '<div class="pad section-gap"><div class="list">' +
+        order.items.map(function (item) {
+          return '<div class="row"><span class="qty-badge">' + Number(item.qty || item.quantity || 1) + "</span>" +
+            '<span class="row__body"><span class="row__title">' + esc(item.name) + "</span></span></div>";
+        }).join("") +
+      "</div></div><div style="height:18px"></div>";
+
+    bottom.innerHTML = '<div class="footbar"><button class="btn btn--primary btn--lg btn--block" data-action="remote-advance">' +
+      (order.status === "claimed" ? "Confirm pickup" : "Mark delivered") + "</button></div>";
+    initializeLiveMap("routeMap", destinationPosition);
+    updateGpsReadout();
+  }
+
   function milestonesDone(order) {
     return order.status === "claimed" ? 1 : order.status === "picked_up" ? 2 : order.status === "delivered" ? 3 : 0;
   }
@@ -626,6 +801,10 @@
     event.preventDefault();
     var button = event.target.querySelector('button[type="submit"]');
     if (button) button.disabled = true;
+    if (!API) {
+      renderLogin("Driver login needs the deployed backend URL. Set KF_API_URL in apps/js/config.js.");
+      return;
+    }
     var body = Object.fromEntries(new FormData(event.target));
     var endpoint = authMode === "register" ? "/api01/auth/register" : "/api01/auth/login";
 
@@ -674,15 +853,24 @@
       return;
     }
 
+    var remoteClaimTarget = event.target.closest("[data-remote-claim]");
+    if (remoteClaimTarget) {
+      claimRemoteDelivery(remoteClaimTarget.getAttribute("data-remote-claim"));
+      return;
+    }
+
     var action = event.target.closest("[data-action]");
     if (!action) return;
     var name = action.getAttribute("data-action");
 
     if (name === "logout") {
       stopGps();
+      stopRemotePolling();
       currentPosition = null;
       gpsTrail = [];
       currentDestination = "";
+      remoteOrders = [];
+      remoteActiveOrder = null;
       driverSession = null;
       destroyLiveMap();
       sessionStorage.removeItem(SESSION_KEY);
@@ -739,6 +927,10 @@
       } else {
         UI.toast("That delivery has moved on");
       }
+    }
+
+    if (name === "remote-advance") {
+      advanceRemoteDelivery();
     }
   });
 

@@ -1,4 +1,5 @@
-data/
-kassifleet.json
-token-secret
-.env
+# Ignore log files
+*.log
+
+# Ignore log folders
+logs/

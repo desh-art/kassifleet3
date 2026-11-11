@@ -1,14 +1,12 @@
 /* Driver app: nearby pickups sorted by distance, then the active route with its GPS trail. */
 (function () {
   "use strict";
-
   var UI = window.KFUI;
   var KF = window.KF;
   var money = UI.money;
   var esc = UI.escape;
   var API = (window.KF_API_URL || (location.protocol === "file:" ? "http://127.0.0.1:3000" : location.origin)).replace(/\/+$/, "");
   var SESSION_KEY = "kf.driver.session";
-
   var header = document.getElementById("header");
   var main = document.getElementById("main");
   var bottom = document.getElementById("bottom");
@@ -23,7 +21,6 @@
   var currentDestination = "";
   var driverSession = null;
   var authMode = "login";
-
   function renderLogin(message) {
     header.innerHTML =
       '<div class="header-row"><a class="brand" href="./index.html">Kassi<em>Fleet</em></a>' +
@@ -48,7 +45,6 @@
         '<div class="meta" id="authMessage" role="status" aria-live="polite" style="margin-top:12px;color:var(--danger)">' + esc(message || "") + "</div>" +
       "</div></div>";
   }
-
   async function activateSession(session) {
     if (!session.user || session.user.role !== "driver" || !KF.setDriverIdentity(session.user)) {
       throw new Error("A valid driver account is required.");
@@ -57,7 +53,6 @@
     sessionStorage.setItem(SESSION_KEY, JSON.stringify(session));
     render();
   }
-
   async function restoreSession() {
     var saved;
     try {
@@ -79,20 +74,17 @@
       renderLogin(error.message || "Could not reach the server. Start the Kassi Fleet backend and try again.");
     }
   }
-
   function stopGps(message) {
     if (gpsWatchId !== null && navigator.geolocation) navigator.geolocation.clearWatch(gpsWatchId);
     gpsWatchId = null;
     gpsMessage = message || "GPS is off";
   }
-
   function destroyLiveMap() {
     if (liveMap) liveMap.remove();
     liveMap = null;
     liveMarker = null;
     liveTrailLayer = null;
   }
-
   function initializeLiveMap(elementId, destination) {
     destroyLiveMap();
     var element = document.getElementById(elementId);
